@@ -1,0 +1,131 @@
+#--------------------------------------------------------------------------------------------------
+FROM ubuntu:latest as builder
+
+ENV TZ 'Europe/Berlin'
+
+RUN echo $TZ > /etc/timezone 
+
+RUN    apt-get update                                       \
+    && apt-get install -y tzdata                            \
+    && rm /etc/localtime                                    \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime       \
+    && dpkg-reconfigure -f noninteractive tzdata            \
+    && apt-get clean
+
+RUN apt-get install --yes build-essential lsb-release curl sudo vim python3-pip
+RUN python3 -m pip install --upgrade pip
+
+#
+RUN echo "root:password" | chpasswd
+
+#--------------------------------------------------------------------------------------------------
+# Create user
+ARG USER_NAME=user
+ARG USER_HOME=/home/user
+
+RUN    groupadd work            --gid 1000 \
+    && adduser  user --uid 1000 --gid 1000 --home $USER_HOME --disabled-password --gecos User
+
+#--------------------------------------------------------------------------------------------------
+# Setup sudo
+RUN echo "%work	ALL=(ALL:ALL) NOPASSWD:ALL"  >/etc/sudoers.d/group
+
+
+ARG INSTALLED_SOFTWARE=/etc/installed_software
+
+#--------------------------------------------------------------------------------------------------
+FROM builder as nodejs_install
+
+RUN curl -fsSL https://deb.nodesource.com/setup_17.x | bash -
+RUN apt-get install --yes nodejs
+
+RUN echo "- node version $(node -v), npm $(npm -v)" >>$INSTALLED_SOFTWARE
+RUN npm -g update npm
+RUN npm -g install yarn npm-check-updates
+RUN npm -g install ijavascript
+
+RUN echo "- ijavascript" >>$INSTALLED_SOFTWARE
+
+#--------------------------------------------------------------------------------------------------
+FROM nodejs_install as manim_install
+
+RUN apt-get install --yes libcairo2-dev libpango1.0-dev ffmpeg
+RUN echo "- ffmpeg" >>$INSTALLED_SOFTWARE
+
+#--------------------------------------------------------------------------------------------------
+FROM manim_install as julia_download
+
+ARG INSTALLER=/tmp/installer.tar.gz
+RUN curl -o  $INSTALLER -L 'https://julialang-s3.julialang.org/bin/linux/x64/1.7/julia-1.7.2-linux-x86_64.tar.gz'
+
+#--------------------------------------------------------------------------------------------------
+FROM julia_download as julia_install
+
+ARG JULIA172=/opt/julia-1.7.2
+RUN tar xvfz $INSTALLER -C /opt
+RUN chown user $JULIA172
+RUN chgrp work $JULIA172
+RUN chmod g+w  $JULIA172
+
+RUN rm $INSTALLER
+
+RUN echo "- $(julia -v)"  >>$INSTALLED_SOFTWARE
+
+#--------------------------------------------------------------------------------------------------
+FROM julia_install as anaconda_download
+
+ARG INSTALLER=/tmp/installer.sh
+RUN curl -o   $INSTALLER -L 'https://repo.anaconda.com/archive/Anaconda3-2021.11-Linux-x86_64.sh'
+
+#--------------------------------------------------------------------------------------------------
+FROM anaconda_download as anaconda_install
+
+ARG ANACONDA3=/opt/anaconda3
+RUN mkdir      $ANACONDA3
+RUN chown user $ANACONDA3
+RUN chgrp work $ANACONDA3
+RUN chmod g+w  $ANACONDA3
+
+#==================================================================================================
+USER user
+
+RUN mkdir -p $USER_HOME/.local/bin
+RUN bash $INSTALLER -b -u -p $ANACONDA3
+RUN rm $INSTALLER
+
+RUN echo "- $(anaconda --version)"                  >>$INSTALLED_SOFTWARE
+RUN echo "- $(conda --version)"                     >>$INSTALLED_SOFTWARE
+RUN echo "- $($ANACONDA3/bin/python --version)"     >>$INSTALLED_SOFTWARE
+
+#
+RUN $ANACONDA3/bin/conda init bash
+
+#
+RUN $ANACONDA3/bin/jupyter notebook --generate-config
+RUN sed -i '1,$s/.*NotebookApp.notebook_dir.*/c.NotebookApp.notebook_dir="\/notebooks"/g'  $USER_HOME/.jupyter/jupyter_notebook_config.py
+
+#
+RUN echo "$ANACONDA3/bin/jupyter notebook --no-browser --ip='*' --NotebookApp.token='' --NotebookApp.password=''" >>$USER_HOME/.local/bin/run_jupyter
+RUN chmod +x $USER_HOME/.local/bin/run_jupyter
+
+#
+#RUN python3 -m pip install manim jupyter-manim
+
+# Jupyter Extensions
+RUN (echo 'using Pkg'; echo 'Pkg.add("IJulia")') | $JULIA172/bin/julia
+
+# Javascript Extensions
+RUN PATH=$PATH:$USER_HOME/.local/bin:$ANACONDA3/bin:$JULIA172/bin ijsinstall
+
+#--------------------------------------------------------------------------------------------------
+FROM anaconda_install as user
+
+USER    $USER_NAME
+WORKDIR $USER_HOME
+
+RUN echo "\nPATH=$PATH:$USER_HOME/.local/bin:$ANACONDA3/bin:$JULIA172/bin"  >>$HOME/.bashrc
+
+RUN echo "\ncat $INSTALLED_SOFTWARE"                                        >>$HOME/.bashrc
+
+#
+CMD ["bash"]

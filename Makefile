@@ -1,6 +1,6 @@
 HERE := ${CURDIR}
 
-CONTAINER := anaconda
+CONTAINER := playground_swissarmyknife
 
 default:
 	cat Makefile
